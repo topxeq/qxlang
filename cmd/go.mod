@@ -2,9 +2,12 @@ module github.com/topxeq/qxlang/qx
 
 go 1.21.5
 
+replace github.com/topxeq/qxlang v0.0.0 => ../
+
 require github.com/topxeq/tk v1.0.5
 
 require (
+	github.com/topxeq/qxlang v0.0.0
 	github.com/aarzilli/sandblast v0.0.0-20151220083925-43f8fb998d06 // indirect
 	github.com/alecthomas/chroma v0.10.0 // indirect
 	github.com/andybalholm/brotli v1.0.4 // indirect
