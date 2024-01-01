@@ -1,0 +1,8 @@
+systemCmd $1 "qx" "-gopath" "basic.qx"
+
+testByText $1 "9\n" $seq "basic.qx"
+
+systemCmd $1 "qx" "-gopath" "goto.qx"
+
+testByText $1 "start...\nlabel1 = 1.8\nc = 1.8\n" $seq "goto.qx"
+
