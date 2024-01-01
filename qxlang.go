@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -14,6 +15,15 @@ import (
 
 var VersionG string = "0.0.1"
 var DebugG = false
+
+// OpCodes starts
+const (
+	OpConst int = iota
+
+	OpAssignLocal
+
+	OpEqual
+)
 
 // instructions start
 var InstrNameSet map[string]int = map[string]int{
@@ -46,6 +56,31 @@ var InstrNameSet map[string]int = map[string]int{
 
 	"=": 401, // assignment, from local variable to global, assign value to local if not found
 
+	// if/else, switch related
+	"if": 610, // usage: if $boolValue1 :labelForTrue :labelForElse
+
+	// compare related
+
+	"<": 703, // compare two value if the 1st < 2nd
+
+	// func related
+
+	"call": 1010, // call a normal function, usage: call $result :func1 $arg1 $arg2...
+	// result value could not be omitted, use $drop if not neccessary
+	// all arguments/parameters will be put into the local variable "inputL" in the function
+	// and the function should return result in local variable "outL"
+	// use "ret $result" is a covenient way to set value of $outL and return from the function
+
+	"ret": 1020, // return from a normal function or a fast call function, while for normal function call, can with a paramter for set $outL
+
+	// array/slice related
+
+	"getArrayItem": 1123,
+	"[]":           1123,
+
+	// time related
+	"now": 1910, // get the current time
+
 	// print related
 
 	"pln": 10410, // same as println function in other languages
@@ -67,7 +102,12 @@ var InstrNameSet map[string]int = map[string]int{
 
 	// operator related extra
 
+	"++i": 9999900011,
+	"--i": 9999900015,
+
 	"+i": 9999900101, // add 2 integer values
+
+	"-t": 9999900701, // sub 2 time values, return float seconds
 
 }
 
@@ -82,6 +122,12 @@ type Instr struct {
 	Params   []VarRef
 }
 
+type OpCode struct {
+	Code     int
+	ParamLen int
+	Params   []int
+}
+
 type FuncContext struct {
 	Vars []interface{}
 
@@ -91,6 +137,8 @@ type FuncContext struct {
 }
 
 type VM struct {
+	Consts []interface{}
+
 	Regs  []interface{} // the first(index 0) is always global vars map, the second is input param, the third is the return/output value
 	Stack *tk.SimpleStack
 	Vars  []interface{}
@@ -99,7 +147,8 @@ type VM struct {
 
 	Labels map[string]int
 
-	InstrList []Instr
+	InstrList  []Instr
+	OpCodeList []OpCode
 
 	FuncStack *tk.SimpleStack
 
@@ -154,6 +203,8 @@ func NewVM(inputA ...interface{}) *VM {
 	p := &VM{}
 
 	p.Seq = tk.NewSeq()
+
+	p.Consts = make([]interface{}, 0, 10)
 
 	p.Regs = make([]interface{}, 10)
 	p.Vars = make([]interface{}, 10)
@@ -860,6 +911,34 @@ func (p *VM) ParseVar(strA string, optsA ...interface{}) VarRef {
 	return VarRef{-3, s1T}
 }
 
+func (p *VM) DeepCompile() error {
+	p.OpCodeList = make([]OpCode, 0, len(p.InstrList))
+	for _, v := range p.InstrList {
+		switch v.Code {
+		case 401: // =
+			jv2 := v.Params[1]
+			switch jv2.Ref {
+			case -3:
+				p.Consts = append(p.Consts, jv2.Value)
+
+				p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpConst, ParamLen: 1, Params: []int{len(p.Consts) - 1}})
+			}
+
+			jv1 := v.Params[0]
+			switch jv1.Ref {
+			case 3:
+				p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpAssignLocal, ParamLen: 1, Params: []int{jv1.Value.(int)}})
+			}
+
+		}
+	}
+
+	tk.Pl("Consts: %#v", p.Consts)
+	tk.Pl("OpCodeList: %#v", p.OpCodeList)
+
+	return nil
+}
+
 func Compile(scriptA string) (*VM, error) {
 	if DebugG {
 		tk.Pl("compiling: %#v", scriptA)
@@ -1258,8 +1337,40 @@ func (p *VM) GetLabelIndex(inputA interface{}) int {
 	return -1
 }
 
+func (p *VM) RunOpCodes() (resultR interface{}) {
+	p.CodePointer = 0
+
+	var opCodeT OpCode
+
+	for {
+		opCodeT = p.OpCodeList[p.CodePointer]
+
+		switch opCodeT.Code {
+		case OpConst:
+			p.Stack.Push(p.Consts[opCodeT.Params[0]])
+		case OpAssignLocal:
+			p.Vars[opCodeT.Params[0]] = p.Stack.Pop()
+		}
+
+		p.CodePointer++
+
+		if p.CodePointer >= len(p.OpCodeList) {
+			break
+		}
+	}
+
+	resultR = nil
+	return
+}
+
 func RunInstr(p *VM, instrA *Instr) (resultR interface{}) {
+	// startT := time.Now()
+
 	defer func() {
+		// endT := time.Now()
+
+		// tk.Pl("instr(%#v) dur: %d", instrA.Code, endT.Sub(startT))
+
 		if r1 := recover(); r1 != nil {
 			// tk.Printfln("exception: %v", r)
 			// if p.ErrorHandler > -1 {
@@ -1405,6 +1516,323 @@ func RunInstr(p *VM, instrA *Instr) (resultR interface{}) {
 
 		return ""
 
+	case 610: // if
+		// tk.Plv(instrT)
+		if instrT.ParamLen < 2 {
+			return p.Errf("not enough parameters")
+		}
+
+		var condT bool
+		var v2 interface{}
+		var v2o interface{}
+		var ok0 bool
+
+		var elseLabelIntT int = -1
+
+		if instrT.ParamLen > 2 {
+			elseLabelT := p.GetLabelIndex(p.GetVarValue(instrT.Params[2]))
+
+			if elseLabelT < 0 {
+				return p.Errf("invalid label: %v", elseLabelT)
+			}
+
+			elseLabelIntT = elseLabelT
+		}
+
+		v2o = instrT.Params[1]
+
+		v2 = p.GetVarValue(instrT.Params[1])
+
+		// tk.Plv(instrT)
+		tmpv := p.GetVarValue(instrT.Params[0])
+		if DebugG {
+			tk.Pl("if %v -> %v", instrT.Params[0], tmpv)
+		}
+
+		condT, ok0 = tmpv.(bool)
+
+		// if !ok0 {
+		// 	var tmps string
+		// 	tmps, ok0 = tmpv.(string)
+
+		// 	if ok0 {
+		// 		tmprs := QuickEval(tmps, p, r)
+
+		// 		condT, ok0 = tmprs.(bool)
+		// 	}
+		// }
+
+		if !ok0 {
+			return p.Errf("invalid condition parameter: %#v", tmpv)
+		}
+
+		if condT {
+			c2 := p.GetLabelIndex(v2)
+
+			if c2 < 0 {
+				return p.Errf("invalid label: %v", v2o)
+			}
+
+			return c2
+		}
+
+		if elseLabelIntT >= 0 {
+			return elseLabelIntT
+		}
+
+		return ""
+
+	case 703: // <
+		pr := instrT.Params[0]
+		v1 := p.GetVarValue(instrT.Params[1])
+		v2 := p.GetVarValue(instrT.Params[2])
+
+		v3 := tk.GetLTResult(v1, v2)
+
+		p.SetVar(pr, v3)
+		return ""
+
+	case 1010: // call
+		if instrT.ParamLen < 2 {
+			return p.Errf("not enough paramters")
+		}
+
+		pr := instrT.Params[0]
+
+		v1p := 1
+
+		v1 := p.GetVarValue(instrT.Params[v1p])
+
+		v1c := p.GetLabelIndex(v1)
+
+		if v1c < 0 {
+			return p.Errf("invalid label format: %v", v1)
+		}
+
+		p.PointerStack.Push(CallStruct{ReturnPointer: p.CodePointer, ReturnRef: pr})
+
+		funcContextT := NewFuncContext()
+
+		if instrT.ParamLen > 2 {
+			vs := p.ParamsToList(instrT, 2)
+
+			funcContextT.Vars[1] = vs
+		}
+
+		p.FuncStack.Push(funcContextT)
+
+		return v1c
+
+	case 1020: // ret
+		rs := p.PointerStack.Pop()
+
+		if tk.IsUndefined(rs) {
+			return p.Errf("pointer stack empty")
+		}
+
+		nv, ok := rs.(CallStruct)
+
+		if !ok {
+			return p.Errf("not in a call, not a call struct in running stack: %v", rs)
+		}
+
+		currentFuncT := p.GetCurrentFuncContext()
+
+		rsi := currentFuncT.RunDefer(p)
+
+		if tk.IsError(rsi) {
+			return p.Errf("[%v](qxlang) runtime error: %v", tk.GetNowTimeStringFormal(), rsi)
+		}
+
+		if instrT.ParamLen > 0 {
+			// tk.Pl("outL <-: %#v", p.GetVarValue(instrT.Params[0]))
+			currentFuncT.Vars[2] = p.GetVarValue(instrT.Params[0])
+		}
+
+		rs2 := currentFuncT.Vars[2]
+
+		funcContextItemT := p.FuncStack.Pop()
+
+		if tk.IsUndefined(funcContextItemT) {
+			return p.Errf("failed to return from function call while pop func: %v", "no function in func stack")
+		}
+
+		pr := nv.ReturnRef
+
+		if rs2 != nil && rs2 != tk.Undefined {
+			p.SetVar(pr, rs2)
+		} else {
+			p.SetVar(pr, tk.Undefined)
+		}
+
+		return nv.ReturnPointer + 1
+
+	case 1123: // getArrayItem/[]
+		if instrT.ParamLen < 3 {
+			return p.Errf("not enough parameters")
+		}
+
+		var pr = instrT.Params[0]
+
+		v1 := p.GetVarValue(instrT.Params[1])
+
+		if v1 == nil {
+			if instrT.ParamLen > 3 {
+				p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+				return ""
+			} else {
+				return p.Errf("object is nil: (%T)%v", v1, v1)
+			}
+
+		}
+
+		v2 := tk.ToInt(p.GetVarValue(instrT.Params[2]))
+
+		// tk.Pl("v1: %#v, v2: %#v, instr: %#v", v1, v2, instrT)
+
+		switch nv := v1.(type) {
+		case []interface{}:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+			// tk.Pl("r: %v", nv[v2])
+			p.SetVar(pr, nv[v2])
+		case []bool:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+			p.SetVar(pr, nv[v2])
+		case []int:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+			p.SetVar(pr, nv[v2])
+		case []byte:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+			p.SetVar(pr, nv[v2])
+		case []rune:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+			p.SetVar(pr, nv[v2])
+		case []int64:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+			p.SetVar(pr, nv[v2])
+		case []float64:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+			p.SetVar(pr, nv[v2])
+		case []string:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+			p.SetVar(pr, nv[v2])
+		case []map[string]string:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+
+			p.SetVar(pr, nv[v2])
+		case []map[string]interface{}:
+			if (v2 < 0) || (v2 >= len(nv)) {
+				if instrT.ParamLen > 3 {
+					p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+					return ""
+				} else {
+					return p.Errf("index out of range: %v/%v", v2, len(nv))
+				}
+			}
+
+			p.SetVar(pr, nv[v2])
+		default:
+			valueT := reflect.ValueOf(v1)
+
+			kindT := valueT.Kind()
+
+			if kindT == reflect.Array || kindT == reflect.Slice || kindT == reflect.String {
+				lenT := valueT.Len()
+
+				if (v2 < 0) || (v2 >= lenT) {
+					return p.Errf("index out of range: %v/%v", v2, lenT)
+				}
+
+				p.SetVar(pr, valueT.Index(v2).Interface())
+				return ""
+			}
+
+			if instrT.ParamLen > 3 {
+				p.SetVar(pr, p.GetVarValue(instrT.Params[3]))
+			} else {
+				p.SetVar(pr, tk.Undefined)
+			}
+
+			return p.Errf("parameter types not match: %#v", v1)
+		}
+
+		return ""
+
+	case 1910: // now
+
+		pr := instrT.Params[0]
+
+		errT := p.SetVar(pr, time.Now())
+
+		if errT != nil {
+			return p.Errf("%v", errT)
+		}
+
+		return ""
+
 	case 10410: // pln
 		list1T := []interface{}{}
 
@@ -1441,10 +1869,31 @@ func RunInstr(p *VM, instrA *Instr) (resultR interface{}) {
 
 		return ""
 
+	case 9999900015: // --i
+		if instrT.ParamLen < 1 {
+			return p.Errf("not enough parameters")
+		}
+
+		pr := instrT.Params[0]
+		v1p := 0
+
+		v1 := p.GetVarValue(instrT.Params[v1p])
+
+		nv, ok := v1.(int)
+
+		if ok {
+			p.SetVar(pr, nv-1)
+			return ""
+		}
+
+		p.SetVar(pr, tk.ToInt(v1)-1)
+
+		return ""
+
 	case 9999900101: // +i
 		// tk.Plv(instrT)
 		if instrT.ParamLen < 2 {
-			return p.Errf("not enough parameters(参数不够)")
+			return p.Errf("not enough parameters")
 		}
 
 		pr := instrT.Params[0]
@@ -1456,6 +1905,24 @@ func RunInstr(p *VM, instrA *Instr) (resultR interface{}) {
 		v3 := v1 + v2
 
 		p.SetVar(pr, v3)
+
+		return ""
+
+	case 9999900701: // -t
+		// tk.Plv(instrT)
+		if instrT.ParamLen < 2 {
+			return p.Errf("not enough parameters")
+		}
+
+		pr := instrT.Params[0]
+		v1p := 1
+
+		v1 := p.GetVarValue(instrT.Params[v1p]).(time.Time)
+		v2 := p.GetVarValue(instrT.Params[v1p+1]).(time.Time)
+
+		v3 := v1.Sub(v2)
+
+		p.SetVar(pr, v3.Seconds())
 
 		return ""
 
@@ -1595,9 +2062,9 @@ func (p *VM) Run(posA ...int) interface{} {
 			} else if rs == "exit" {
 				break
 				// } else if rs == "cont" {
-				// 	return p.Errf(r, "无效指令: %v", rs)
+				// 	return p.Errf("无效指令: %v", rs)
 				// } else if rs == "brk" {
-				// 	return p.Errf(r, "无效指令: %v", rs)
+				// 	return p.Errf("无效指令: %v", rs)
 			} else {
 				tmpI := tk.StrToInt(rs)
 
@@ -1643,11 +2110,23 @@ func RunCode(scriptA string, optsA ...string) interface{} {
 		return errT
 	}
 
+	errT = compiledT.DeepCompile()
+
+	if errT != nil {
+		return errT
+	}
+
 	if DebugG {
 		tk.Pl("compiled: %v", tk.ToJSONX(compiledT, "-sort", "-indent"))
 	}
 
-	rsT := compiledT.Run()
+	// rsT := compiledT.Run()
+
+	rsT := compiledT.RunOpCodes()
+
+	if DebugG {
+		tk.Pl("compiled: %v", tk.ToJSONX(compiledT, "-sort", "-indent"))
+	}
 
 	return rsT
 }
