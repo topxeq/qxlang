@@ -1043,6 +1043,7 @@ func Compile(scriptA string) (*ByteCode, error) {
 }
 
 func (p *VM) GetCurrentFuncContext() *FuncContext {
+	tk.Pl("GetCurrentFuncContext: %#v", p.FuncStack)
 	if p.FuncStack.Size() < 1 {
 		return nil
 	}
@@ -2093,6 +2094,12 @@ func (p *ByteCode) DealOutputParams(instrA *Instr, startA int) error {
 	return nil
 }
 
+func plDebug(formatA string, argsA ...interface{}) {
+	if DebugG {
+		tk.Pl(formatA, argsA...)
+	}
+}
+
 func (p *ByteCode) DeepCompile() error {
 	p.OpCodeList = make([]OpCode, 0, len(p.InstrList))
 	for _, v := range p.InstrList {
@@ -2125,16 +2132,28 @@ func (p *VM) RunOpCodes() (resultR interface{}) {
 	for {
 		opCodeT = p.Code.OpCodeList[p.CodePointer]
 
+		plDebug("run op: %#v", opCodeT)
+
 		switch opCodeT.Code {
 		case OpConst:
+			plDebug("start stack: %#v", p.Stack)
 			p.Stack.Push(p.Code.Consts[opCodeT.Params[0]])
+			plDebug("end stack: %#v", p.Stack)
 		case OpAssignLocal:
-			p.Vars[opCodeT.Params[0]] = p.Stack.Pop()
+			plDebug("start stack: %#v", p.Stack)
+			p.GetCurrentFuncContext().Vars[opCodeT.Params[0]] = p.Stack.Pop()
+			plDebug("end stack: %#v", p.Stack)
 		case OpGetLocalVarValue:
-			p.Stack.Push(p.Vars[opCodeT.Params[0]])
+			plDebug("start stack: %#v", p.Stack)
+			p.Stack.Push(p.GetCurrentFuncContext().Vars[opCodeT.Params[0]])
+			plDebug("end stack: %#v", p.Stack)
 		case OpAddInt:
+			plDebug("start stack: %#v", p.Stack)
 			p.Stack.Push(p.Stack.Pop().(int) + p.Stack.Pop().(int))
+			plDebug("end stack: %#v", p.Stack)
 		}
+
+		plDebug("")
 
 		p.CodePointer++
 
