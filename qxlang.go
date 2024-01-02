@@ -21,6 +21,9 @@ const (
 	OpConst int = iota
 
 	OpAssignLocal
+	OpGetLocalVarValue
+
+	OpAddInt
 
 	OpEqual
 )
@@ -136,19 +139,23 @@ type FuncContext struct {
 	DeferStack *tk.SimpleStack
 }
 
-type VM struct {
+type ByteCode struct {
+	Labels map[string]int
+
 	Consts []interface{}
+
+	InstrList  []Instr
+	OpCodeList []OpCode
+}
+
+type VM struct {
+	Code *ByteCode
 
 	Regs  []interface{} // the first(index 0) is always global vars map, the second is input param, the third is the return/output value
 	Stack *tk.SimpleStack
 	Vars  []interface{}
 
 	Seq *tk.Seq
-
-	Labels map[string]int
-
-	InstrList  []Instr
-	OpCodeList []OpCode
 
 	FuncStack *tk.SimpleStack
 
@@ -193,7 +200,7 @@ func NewFuncContext() *FuncContext {
 	return rs
 }
 
-func NewVM(inputA ...interface{}) *VM {
+func NewVM(codeA *ByteCode, inputA ...interface{}) *VM {
 	var inputT interface{} = nil
 
 	if len(inputA) > 0 {
@@ -202,9 +209,9 @@ func NewVM(inputA ...interface{}) *VM {
 
 	p := &VM{}
 
-	p.Seq = tk.NewSeq()
+	p.Code = codeA
 
-	p.Consts = make([]interface{}, 0, 10)
+	p.Seq = tk.NewSeq()
 
 	p.Regs = make([]interface{}, 10)
 	p.Vars = make([]interface{}, 10)
@@ -215,8 +222,6 @@ func NewVM(inputA ...interface{}) *VM {
 	p.FuncStack.Push(funcContextT)
 	// p.CurrentFunc = funcContextT
 
-	p.Labels = make(map[string]int)
-	p.InstrList = make([]Instr, 0)
 	p.CodePointer = 0
 
 	p.PointerStack = tk.NewSimpleStack(10, tk.Undefined)
@@ -327,7 +332,7 @@ func ParseLine(commandA string) ([]string, error) {
 	return args, nil
 }
 
-func (p *VM) ParseVar(strA string, optsA ...interface{}) VarRef {
+func (p *ByteCode) ParseVar(strA string, optsA ...interface{}) VarRef {
 	// tk.Pl("parseVar: %#v", strA)
 	s1T := strings.TrimSpace(strA)
 
@@ -911,40 +916,17 @@ func (p *VM) ParseVar(strA string, optsA ...interface{}) VarRef {
 	return VarRef{-3, s1T}
 }
 
-func (p *VM) DeepCompile() error {
-	p.OpCodeList = make([]OpCode, 0, len(p.InstrList))
-	for _, v := range p.InstrList {
-		switch v.Code {
-		case 401: // =
-			jv2 := v.Params[1]
-			switch jv2.Ref {
-			case -3:
-				p.Consts = append(p.Consts, jv2.Value)
-
-				p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpConst, ParamLen: 1, Params: []int{len(p.Consts) - 1}})
-			}
-
-			jv1 := v.Params[0]
-			switch jv1.Ref {
-			case 3:
-				p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpAssignLocal, ParamLen: 1, Params: []int{jv1.Value.(int)}})
-			}
-
-		}
-	}
-
-	tk.Pl("Consts: %#v", p.Consts)
-	tk.Pl("OpCodeList: %#v", p.OpCodeList)
-
-	return nil
-}
-
-func Compile(scriptA string) (*VM, error) {
+func Compile(scriptA string) (*ByteCode, error) {
 	if DebugG {
 		tk.Pl("compiling: %#v", scriptA)
 	}
 
-	p := NewVM()
+	p := &ByteCode{}
+
+	p.Consts = make([]interface{}, 0)
+	p.Labels = make(map[string]int)
+	p.InstrList = make([]Instr, 0)
+	p.OpCodeList = make([]OpCode, 0)
 
 	originCodeLenT := 0
 
@@ -1326,7 +1308,7 @@ func (p *VM) GetLabelIndex(inputA interface{}) int {
 		} else if strings.HasPrefix(s2, "-") {
 			return p.CodePointer - tk.ToInt(s2[1:])
 		} else {
-			labelPointerT, ok := p.Labels[s2]
+			labelPointerT, ok := p.Code.Labels[s2]
 
 			if ok {
 				return labelPointerT
@@ -1335,32 +1317,6 @@ func (p *VM) GetLabelIndex(inputA interface{}) int {
 	}
 
 	return -1
-}
-
-func (p *VM) RunOpCodes() (resultR interface{}) {
-	p.CodePointer = 0
-
-	var opCodeT OpCode
-
-	for {
-		opCodeT = p.OpCodeList[p.CodePointer]
-
-		switch opCodeT.Code {
-		case OpConst:
-			p.Stack.Push(p.Consts[opCodeT.Params[0]])
-		case OpAssignLocal:
-			p.Vars[opCodeT.Params[0]] = p.Stack.Pop()
-		}
-
-		p.CodePointer++
-
-		if p.CodePointer >= len(p.OpCodeList) {
-			break
-		}
-	}
-
-	resultR = nil
-	return
 }
 
 func RunInstr(p *VM, instrA *Instr) (resultR interface{}) {
@@ -2003,7 +1959,7 @@ func (p *VM) Run(posA ...int) interface{} {
 		p.CodePointer = posA[0]
 	}
 
-	if len(p.InstrList) < 1 {
+	if len(p.Code.InstrList) < 1 {
 		return tk.Undefined
 	}
 
@@ -2012,7 +1968,7 @@ func (p *VM) Run(posA ...int) interface{} {
 		// 	tk.Pl("-- RunInstr [%v] %v", p.Running.CodePointer, tk.LimitString(p.Running.Source[p.Running.CodeSourceMap[p.Running.CodePointer]], 50))
 		// }
 
-		resultT := RunInstr(p, &p.InstrList[p.CodePointer])
+		resultT := RunInstr(p, &p.Code.InstrList[p.CodePointer])
 
 		c1T, ok := resultT.(int)
 
@@ -2056,7 +2012,7 @@ func (p *VM) Run(posA ...int) interface{} {
 			if rs == "" {
 				p.CodePointer++
 
-				if p.CodePointer >= len(p.InstrList) {
+				if p.CodePointer >= len(p.Code.InstrList) {
 					break
 				}
 			} else if rs == "exit" {
@@ -2074,9 +2030,9 @@ func (p *VM) Run(posA ...int) interface{} {
 					return fmt.Errorf("invalid instr: %v", rs)
 				}
 
-				if tmpI >= len(p.InstrList) {
+				if tmpI >= len(p.Code.InstrList) {
 					p.RunDeferUpToRoot()
-					return fmt.Errorf("instr index out of range: %v(%v)/%v", tmpI, rs, len(p.InstrList))
+					return fmt.Errorf("instr index out of range: %v(%v)/%v", tmpI, rs, len(p.Code.InstrList))
 				}
 
 				p.CodePointer = tmpI
@@ -2103,6 +2059,94 @@ func (p *VM) Run(posA ...int) interface{} {
 
 }
 
+func (p *ByteCode) DealInputParams(instrA *Instr, startA int) error {
+	var jvn VarRef
+
+	for i := instrA.ParamLen - 1; i >= startA; i-- {
+		jvn = instrA.Params[i]
+		switch jvn.Ref {
+		case -3:
+			p.Consts = append(p.Consts, jvn.Value)
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpConst, ParamLen: 1, Params: []int{len(p.Consts) - 1}})
+		case 3:
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpGetLocalVarValue, ParamLen: 1, Params: []int{jvn.Value.(int)}})
+		}
+
+	}
+
+	return nil
+}
+
+func (p *ByteCode) DealOutputParams(instrA *Instr, startA int) error {
+	var jvn VarRef
+
+	for i := 0; i <= startA; i++ {
+		jvn = instrA.Params[i]
+		switch jvn.Ref {
+		case 3:
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpAssignLocal, ParamLen: 1, Params: []int{jvn.Value.(int)}})
+		}
+
+	}
+
+	return nil
+}
+
+func (p *ByteCode) DeepCompile() error {
+	p.OpCodeList = make([]OpCode, 0, len(p.InstrList))
+	for _, v := range p.InstrList {
+		switch v.Code {
+		case 401: // =
+			p.DealInputParams(&v, 1)
+
+			p.DealOutputParams(&v, 0)
+
+		case 9999900101: // +i
+			p.DealInputParams(&v, 1)
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpAddInt})
+
+			p.DealOutputParams(&v, 0)
+		}
+	}
+
+	tk.Pl("Consts: %#v", p.Consts)
+	tk.Pl("OpCodeList: %v", tk.ToJSONX(p.OpCodeList, "-sort", "-indent"))
+
+	return nil
+}
+
+func (p *VM) RunOpCodes() (resultR interface{}) {
+	p.CodePointer = 0
+
+	var opCodeT OpCode
+
+	for {
+		opCodeT = p.Code.OpCodeList[p.CodePointer]
+
+		switch opCodeT.Code {
+		case OpConst:
+			p.Stack.Push(p.Code.Consts[opCodeT.Params[0]])
+		case OpAssignLocal:
+			p.Vars[opCodeT.Params[0]] = p.Stack.Pop()
+		case OpGetLocalVarValue:
+			p.Stack.Push(p.Vars[opCodeT.Params[0]])
+		case OpAddInt:
+			p.Stack.Push(p.Stack.Pop().(int) + p.Stack.Pop().(int))
+		}
+
+		p.CodePointer++
+
+		if p.CodePointer >= len(p.Code.OpCodeList) {
+			break
+		}
+	}
+
+	resultR = nil
+	return
+}
+
 func RunCode(scriptA string, optsA ...string) interface{} {
 	compiledT, errT := Compile(scriptA)
 
@@ -2122,10 +2166,12 @@ func RunCode(scriptA string, optsA ...string) interface{} {
 
 	// rsT := compiledT.Run()
 
-	rsT := compiledT.RunOpCodes()
+	vmT := NewVM(compiledT)
+
+	rsT := vmT.RunOpCodes()
 
 	if DebugG {
-		tk.Pl("compiled: %v", tk.ToJSONX(compiledT, "-sort", "-indent"))
+		tk.Pl("VM: %v", tk.ToJSONX(vmT, "-sort", "-indent"))
 	}
 
 	return rsT
