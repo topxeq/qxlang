@@ -17,16 +17,110 @@ var VersionG string = "0.0.1"
 var DebugG = false
 
 // OpCodes starts
+
+type OpCodeNum int
+
 const (
-	OpConst int = iota
+	OpConst OpCodeNum = iota
+
+	OpValue
+
+	OpPush
+	OpPop
+	OpPeek
+
+	OpAssignReg
 
 	OpAssignLocal
 	OpGetLocalVarValue
 
+	// OpResetArgsList
+	// OpAppendArgsList
+
+	// OpDealArgsList
+
+	OpGoto
+
 	OpAddInt
 
+	OpPln
+	OpPl
+
 	OpEqual
+
+	OpExit
+
+	OpCall
+	OpRet
+
+	OpNow
+	OpTimeSub
 )
+
+const OpNameListG = `
+OpConst
+
+OpValue
+
+OpPush
+OpPop
+OpPeek
+
+OpAssignReg
+
+OpAssignLocal
+OpGetLocalVarValue
+
+// OpResetArgsList
+// OpAppendArgsList
+
+// OpDealArgsList
+
+OpGoto
+
+OpAddInt
+
+OpPln
+OpPl
+
+OpEqual
+
+OpExit
+
+OpCall
+OpRet
+
+OpNow
+OpTimeSub
+
+`
+
+var OpNameMapG map[int]string = nil
+
+func (v OpCodeNum) String() string {
+	if OpNameMapG == nil {
+		listT := tk.SplitLines(OpNameListG)
+		OpNameMapG = make(map[int]string)
+		idxT := 0
+		for _, v := range listT {
+			v = strings.TrimSpace(v)
+
+			if v == "" {
+				continue
+			}
+
+			if strings.HasPrefix(v, "//") {
+				continue
+			}
+
+			OpNameMapG[idxT] = v
+
+			idxT++
+		}
+	}
+
+	return fmt.Sprintf("%v", OpNameMapG[int(v)])
+}
 
 // instructions start
 var InstrNameSet map[string]int = map[string]int{
@@ -89,6 +183,8 @@ var InstrNameSet map[string]int = map[string]int{
 	"pln": 10410, // same as println function in other languages
 	"plo": 10411, // print a value with its type
 
+	"pl": 10420,
+
 	// system related
 
 	"sleep": 20501, // sleep for n seconds(float, 0.001 means 1 millisecond)
@@ -120,15 +216,17 @@ type VarRef struct {
 }
 
 type Instr struct {
-	Code     int
-	ParamLen int
-	Params   []VarRef
+	SourceLine int
+	Code       int
+	ParamLen   int
+	Params     []VarRef
 }
 
 type OpCode struct {
-	Code     int
-	ParamLen int
-	Params   []int
+	SourceLine int
+	Code       OpCodeNum
+	ParamLen   int
+	Params     []int
 }
 
 type FuncContext struct {
@@ -140,12 +238,18 @@ type FuncContext struct {
 }
 
 type ByteCode struct {
+	Source []string
+
 	Labels map[string]int
 
 	Consts []interface{}
 
 	InstrList  []Instr
 	OpCodeList []OpCode
+
+	// for trace
+	InstrToLineMap map[int]int
+	// OpCodeListToLineMap map[int]int
 }
 
 type VM struct {
@@ -162,6 +266,10 @@ type VM struct {
 	CodePointer int
 	// CurrentFunc *FuncContext
 
+	// InternalArgsList []interface{}
+
+	InternalStack *tk.SimpleStack
+
 	PointerStack *tk.SimpleStack
 
 	ErrorHandler int
@@ -170,6 +278,12 @@ type VM struct {
 type CallStruct struct {
 	ReturnPointer int
 	ReturnRef     VarRef
+	Value         interface{}
+}
+
+type DeepCallStruct struct {
+	ReturnPointer int
+	ReturnRef     OpCode
 	Value         interface{}
 }
 
@@ -216,6 +330,7 @@ func NewVM(codeA *ByteCode, inputA ...interface{}) *VM {
 	p.Regs = make([]interface{}, 10)
 	p.Vars = make([]interface{}, 10)
 	p.Stack = tk.NewSimpleStack(10, tk.Undefined)
+	p.InternalStack = tk.NewSimpleStack(10, tk.Undefined)
 
 	p.FuncStack = tk.NewSimpleStack(10, tk.Undefined)
 	funcContextT := NewFuncContext()
@@ -928,9 +1043,13 @@ func Compile(scriptA string) (*ByteCode, error) {
 	p.InstrList = make([]Instr, 0)
 	p.OpCodeList = make([]OpCode, 0)
 
+	p.InstrToLineMap = make(map[int]int)
+
 	originCodeLenT := 0
 
 	sourceT := tk.SplitLines(scriptA)
+
+	p.Source = sourceT
 
 	pointerT := originCodeLenT
 
@@ -984,6 +1103,7 @@ func Compile(scriptA string) (*ByteCode, error) {
 		}
 
 		codeListT = append(codeListT, v)
+		p.InstrToLineMap[pointerT] = i
 		pointerT++
 	}
 
@@ -1011,13 +1131,13 @@ func Compile(scriptA string) (*ByteCode, error) {
 		codeT, ok := InstrNameSet[instrNameT]
 
 		if !ok {
-			instrT := Instr{Code: codeT, ParamLen: 1, Params: []VarRef{VarRef{Ref: -3, Value: v}}}
+			instrT := Instr{SourceLine: p.InstrToLineMap[i], Code: codeT, ParamLen: 1, Params: []VarRef{VarRef{Ref: -3, Value: v}}}
 			p.InstrList = append(p.InstrList, instrT)
 
 			return nil, fmt.Errorf("compile error(line %v %v): unknown instr", i, tk.LimitString(v, 50))
 		}
 
-		instrT := Instr{Code: codeT, Params: make([]VarRef, 0, lenT-1)}
+		instrT := Instr{SourceLine: p.InstrToLineMap[i], Code: codeT, Params: make([]VarRef, 0, lenT-1)}
 
 		list3T := []VarRef{}
 
@@ -1043,7 +1163,7 @@ func Compile(scriptA string) (*ByteCode, error) {
 }
 
 func (p *VM) GetCurrentFuncContext() *FuncContext {
-	tk.Pl("GetCurrentFuncContext: %#v", p.FuncStack)
+	plDebug("GetCurrentFuncContext: %#v", p.FuncStack)
 	if p.FuncStack.Size() < 1 {
 		return nil
 	}
@@ -2060,24 +2180,50 @@ func (p *VM) Run(posA ...int) interface{} {
 
 }
 
-func (p *ByteCode) DealInputParams(instrA *Instr, startA int) error {
+func (p *ByteCode) DealInputParams(instrA *Instr, startA int) int {
 	var jvn VarRef
 
 	for i := instrA.ParamLen - 1; i >= startA; i-- {
 		jvn = instrA.Params[i]
 		switch jvn.Ref {
-		case -3:
+		case -3: // value
 			p.Consts = append(p.Consts, jvn.Value)
 
-			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpConst, ParamLen: 1, Params: []int{len(p.Consts) - 1}})
-		case 3:
-			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpGetLocalVarValue, ParamLen: 1, Params: []int{jvn.Value.(int)}})
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpConst, ParamLen: 1, Params: []int{len(p.Consts) - 1}, SourceLine: instrA.SourceLine})
+		case -7: // $peek
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpPeek, SourceLine: instrA.SourceLine})
+			// p.OpCodeListToLineMap[len(p.OpCodeList)-1] = instrA.SourceLine
+		case -56: // integer label
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpValue, ParamLen: 1, Params: []int{jvn.Value.(int)}, SourceLine: instrA.SourceLine})
+		case 3: // local vars
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpGetLocalVarValue, ParamLen: 1, Params: []int{jvn.Value.(int)}, SourceLine: instrA.SourceLine})
 		}
 
 	}
 
-	return nil
+	return instrA.ParamLen - startA
 }
+
+// func (p *ByteCode) DealInputParamsToList(instrA *Instr, startA int) int {
+// 	var jvn VarRef
+
+// 	for i := instrA.ParamLen - 1; i >= startA; i-- {
+// 		jvn = instrA.Params[i]
+// 		switch jvn.Ref {
+// 		case -3:
+// 			p.Consts = append(p.Consts, jvn.Value)
+
+// 			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpConst, ParamLen: 1, Params: []int{len(p.Consts) - 1}})
+// 		case 3:
+// 			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpGetLocalVarValue, ParamLen: 1, Params: []int{jvn.Value.(int)}})
+// 		default:
+// 			tk.Pl("undealt var type: %#v", jvn)
+// 		}
+
+// 	}
+
+// 	return instrA.ParamLen - startA
+// }
 
 func (p *ByteCode) DealOutputParams(instrA *Instr, startA int) error {
 	var jvn VarRef
@@ -2086,7 +2232,11 @@ func (p *ByteCode) DealOutputParams(instrA *Instr, startA int) error {
 		jvn = instrA.Params[i]
 		switch jvn.Ref {
 		case 3:
-			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpAssignLocal, ParamLen: 1, Params: []int{jvn.Value.(int)}})
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpAssignLocal, ParamLen: 1, Params: []int{jvn.Value.(int)}, SourceLine: instrA.SourceLine})
+		default:
+			tk.Pl("undealt var type: %#v", jvn)
+			os.Exit(1)
+			return fmt.Errorf("undealt var type: %#v", jvn)
 		}
 
 	}
@@ -2096,30 +2246,116 @@ func (p *ByteCode) DealOutputParams(instrA *Instr, startA int) error {
 
 func plDebug(formatA string, argsA ...interface{}) {
 	if DebugG {
-		tk.Pl(formatA, argsA...)
+		tk.Pl("[D] "+formatA, argsA...)
 	}
 }
 
 func (p *ByteCode) DeepCompile() error {
 	p.OpCodeList = make([]OpCode, 0, len(p.InstrList))
-	for _, v := range p.InstrList {
+
+	// p.OpCodeListToLineMap = make(map[int]int)
+
+	deepLabelMapT := map[int]int{}
+
+	undealtLabelListT := [][]int{}
+
+	for i, v := range p.InstrList {
+		deepLabelMapT[i] = len(p.OpCodeList)
+
 		switch v.Code {
+		case 1010: // call
+			lenT := p.DealInputParams(&v, 1)
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpCall, ParamLen: 1, Params: []int{lenT}, SourceLine: v.SourceLine})
+
+			p.DealOutputParams(&v, 0)
+		case 1020: // ret
+			lenT := p.DealInputParams(&v, 0)
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpRet, ParamLen: 1, Params: []int{lenT}, SourceLine: v.SourceLine})
+		case 199: // exit
+			lenT := p.DealInputParams(&v, 0)
+
+			if lenT > 0 {
+				p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpAssignReg, ParamLen: 1, Params: []int{2}, SourceLine: v.SourceLine})
+			}
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpExit, SourceLine: v.SourceLine})
+
+		case 220: // push
+			p.DealInputParams(&v, 0)
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpPush, SourceLine: v.SourceLine})
+
+		case 224: // pop
+			// p.DealInputParams(&v, 0)
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpPop, SourceLine: v.SourceLine})
+
+			p.DealOutputParams(&v, 0)
+
+		case 180: // goto
+			p.DealInputParams(&v, 0)
+
+			undealtLabelListT = append(undealtLabelListT, []int{len(p.OpCodeList) - 1, 0})
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpGoto, SourceLine: v.SourceLine})
+
 		case 401: // =
 			p.DealInputParams(&v, 1)
 
 			p.DealOutputParams(&v, 0)
+		case 1910: // now
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpNow, SourceLine: v.SourceLine})
 
+			p.DealOutputParams(&v, 0)
+		case 10410: // pln
+			// paramLenT := p.DealInputParamsToList(&v, 0)
+			paramLenT := p.DealInputParams(&v, 0)
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpPln, ParamLen: 1, Params: []int{paramLenT}, SourceLine: v.SourceLine})
+
+		// p.DealOutputParams(&v, 0)
+		case 10420: // pl
+			// paramLenT := p.DealInputParamsToList(&v, 0)
+			paramLenT := p.DealInputParams(&v, 0)
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpPl, ParamLen: 1, Params: []int{paramLenT}, SourceLine: v.SourceLine})
+
+			// p.DealOutputParams(&v, 0)
 		case 9999900101: // +i
 			p.DealInputParams(&v, 1)
 
-			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpAddInt})
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpAddInt, SourceLine: v.SourceLine})
 
 			p.DealOutputParams(&v, 0)
+
+		case 9999900701: // -t
+			p.DealInputParams(&v, 1)
+
+			p.OpCodeList = append(p.OpCodeList, OpCode{Code: OpTimeSub, SourceLine: v.SourceLine})
+
+			p.DealOutputParams(&v, 0)
+
+		default:
+			return fmt.Errorf("unknown instr: %#v(line %v: %v)", v, v.SourceLine, p.Source[v.SourceLine])
 		}
 	}
 
-	tk.Pl("Consts: %#v", p.Consts)
-	tk.Pl("OpCodeList: %v", tk.ToJSONX(p.OpCodeList, "-sort", "-indent"))
+	for i, v := range undealtLabelListT {
+		labelIndexT := p.OpCodeList[v[0]].Params[v[1]]
+
+		deepLabelIndexT, ok := deepLabelMapT[labelIndexT]
+
+		if !ok {
+			return fmt.Errorf("deep label index not found for %V: %v", i, labelIndexT)
+		}
+
+		p.OpCodeList[v[0]].Params[v[1]] = deepLabelIndexT
+	}
+
+	plDebug("Consts: %#v", p.Consts)
+	plDebug("OpCodeList: %v", tk.ToJSONX(p.OpCodeList, "-sort", "-indent"))
 
 	return nil
 }
@@ -2132,25 +2368,206 @@ func (p *VM) RunOpCodes() (resultR interface{}) {
 	for {
 		opCodeT = p.Code.OpCodeList[p.CodePointer]
 
-		plDebug("run op: %#v", opCodeT)
+		plDebug("run op: %v(%#v), line[%v]: %v", opCodeT.Code, opCodeT, opCodeT.SourceLine, p.Code.Source[opCodeT.SourceLine])
 
 		switch opCodeT.Code {
+		case OpRet:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			rs := p.PointerStack.Pop().(DeepCallStruct)
+
+			currentFuncT := p.GetCurrentFuncContext()
+
+			rsi := currentFuncT.RunDefer(p)
+
+			if tk.IsError(rsi) {
+				return p.Errf("[%v](qxlang) runtime error in call return: %v", tk.GetNowTimeStringFormal(), rsi)
+			}
+
+			paramLenT := opCodeT.Params[0]
+
+			if paramLenT > 0 {
+				// tk.Pl("outL <-: %#v", p.GetVarValue(instrT.Params[0]))
+				currentFuncT.Vars[2] = p.InternalStack.Pop()
+			}
+
+			p.InternalStack.Push(currentFuncT.Vars[2])
+
+			funcContextItemT := p.FuncStack.Pop()
+
+			if tk.IsUndefined(funcContextItemT) {
+				return p.Errf("failed to return from function call while pop func: %v", "no function in func stack")
+			}
+
+			// pr := nv.ReturnRef
+
+			// if rs2 != nil && rs2 != tk.Undefined {
+			// 	p.SetVar(pr, rs2)
+			// } else {
+			// 	p.SetVar(pr, tk.Undefined)
+			// }
+
+			return rs.ReturnPointer + 1
+
+			plDebug("end stack: %#v", p.InternalStack)
+			continue
+		case OpCall:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.PointerStack.Push(DeepCallStruct{ReturnPointer: p.CodePointer}) // , ReturnRef: p.InternalStack.Pop().(OpCode)
+
+			funcContextT := NewFuncContext()
+
+			vargsLenT := opCodeT.Params[0]
+
+			opLabelT := p.InternalStack.Pop().(int)
+
+			vs := make([]interface{}, vargsLenT-1)
+			for j := 0; j < vargsLenT-1; j++ {
+				vs[j] = p.InternalStack.Pop()
+			}
+
+			funcContextT.Vars[1] = vs
+
+			p.FuncStack.Push(funcContextT)
+
+			p.CodePointer = opLabelT
+
+			plDebug("end stack: %#v", p.InternalStack)
+			continue
+		case OpNow:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.InternalStack.Push(time.Now())
+
+			plDebug("end stack: %#v", p.InternalStack)
 		case OpConst:
-			plDebug("start stack: %#v", p.Stack)
-			p.Stack.Push(p.Code.Consts[opCodeT.Params[0]])
-			plDebug("end stack: %#v", p.Stack)
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.InternalStack.Push(p.Code.Consts[opCodeT.Params[0]])
+
+			plDebug("end stack: %#v", p.InternalStack)
+		case OpValue:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.InternalStack.Push(opCodeT.Params[0])
+
+			plDebug("end stack: %#v", p.InternalStack)
 		case OpAssignLocal:
-			plDebug("start stack: %#v", p.Stack)
-			p.GetCurrentFuncContext().Vars[opCodeT.Params[0]] = p.Stack.Pop()
-			plDebug("end stack: %#v", p.Stack)
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.GetCurrentFuncContext().Vars[opCodeT.Params[0]] = p.InternalStack.Pop()
+
+			plDebug("end stack: %#v", p.InternalStack)
 		case OpGetLocalVarValue:
-			plDebug("start stack: %#v", p.Stack)
-			p.Stack.Push(p.GetCurrentFuncContext().Vars[opCodeT.Params[0]])
-			plDebug("end stack: %#v", p.Stack)
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.InternalStack.Push(p.GetCurrentFuncContext().Vars[opCodeT.Params[0]])
+
+			plDebug("end stack: %#v", p.InternalStack)
+		// case OpDealArgsList:
+		// 	plDebug("start stack: %#v", p.InternalStack)
+
+		// 	lenT := p.InternalStack.Pop().(int)
+
+		// 	listT := make([]interface{}, lenT)
+
+		// 	for i := 0; i < lenT; i++ {
+		// 		listT[i] = p.InternalStack.Pop()
+		// 	}
+
+		// 	p.InternalStack.Push(listT)
+
+		// 	plDebug("end stack: %#v", p.InternalStack)
+
+		case OpPush:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.Stack.Push(p.InternalStack.Pop())
+
+			plDebug("end stack: %#v", p.InternalStack)
+		case OpPop:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.InternalStack.Push(p.Stack.Pop())
+
+			plDebug("end stack: %#v", p.InternalStack)
+		case OpPeek:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.InternalStack.Push(p.Stack.Peek())
+
+			plDebug("end stack: %#v", p.InternalStack)
+		case OpExit:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			resultR = p.Regs[2]
+			return
+
+			plDebug("end stack: %#v", p.InternalStack)
+		case OpGoto:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			labelT := p.InternalStack.Pop().(int)
+
+			if labelT >= 0 {
+				p.CodePointer = labelT
+
+				plDebug("end stack: %#v", p.InternalStack)
+				continue
+			}
+
+			plDebug("end stack: %#v", p.InternalStack)
+
+			resultR = p.Errf("invalid label: %v", labelT)
+			return
 		case OpAddInt:
-			plDebug("start stack: %#v", p.Stack)
-			p.Stack.Push(p.Stack.Pop().(int) + p.Stack.Pop().(int))
-			plDebug("end stack: %#v", p.Stack)
+			plDebug("start stack: %#v", p.InternalStack)
+
+			p.InternalStack.Push(p.InternalStack.Pop().(int) + p.InternalStack.Pop().(int))
+
+			plDebug("end stack: %#v", p.InternalStack)
+		case OpTimeSub:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			v1 := p.InternalStack.Pop().(time.Time)
+			v2 := p.InternalStack.Pop().(time.Time)
+
+			v3 := v1.Sub(v2)
+
+			p.InternalStack.Push(v3.Seconds())
+
+			plDebug("end stack: %#v", p.InternalStack)
+		case OpPln:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			lenT := opCodeT.Params[0] // p.InternalStack.Pop().(int)
+
+			listT := make([]interface{}, lenT)
+
+			for i := 0; i < lenT; i++ {
+				listT[i] = p.InternalStack.Pop()
+			}
+
+			fmt.Println(listT...)
+
+			plDebug("end stack: %#v", p.InternalStack)
+		case OpPl:
+			plDebug("start stack: %#v", p.InternalStack)
+
+			lenT := opCodeT.Params[0] // p.InternalStack.Pop().(int)
+
+			formatT := p.InternalStack.Pop().(string)
+
+			listT := make([]interface{}, lenT)
+
+			for i := 1; i < lenT; i++ {
+				listT[i] = p.InternalStack.Pop()
+			}
+
+			fmt.Printf(formatT, listT...)
+
+			plDebug("end stack: %#v", p.InternalStack)
 		}
 
 		plDebug("")

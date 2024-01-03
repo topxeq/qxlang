@@ -1,9 +1,10 @@
-// use function inputL and outL for input and output
-// and cal Fibonacci numbers(the 18th) by recursive function
+// cal Fibonacci numbers(the 18th) by recursive function
 
 now $4
 
-call $3 :fib #i35
+pl "now: %v" $4
+
+call $3 :fib #i10
 
 now $5
 
